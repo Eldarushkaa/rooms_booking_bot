@@ -280,6 +280,7 @@ def kb_settings() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🔄 Сменить активную компанию", callback_data="settings_switch")],
         [InlineKeyboardButton(text="🚪 Покинуть текущую компанию", callback_data="settings_leave")],
         [InlineKeyboardButton(text="🔑 Вступить в другую компанию", callback_data="settings_join")],
+        [InlineKeyboardButton(text="➕ Создать новую компанию", callback_data="create_company")],
         [InlineKeyboardButton(text="◀️ Главное меню", callback_data="main_menu")],
     ])
 
