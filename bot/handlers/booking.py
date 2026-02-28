@@ -10,6 +10,7 @@ from bot.keyboards.keyboards import (
     kb_cancel, kb_my_bookings_nav, kb_free_rooms, kb_back_to_menu,
     kb_main_menu, kb_date_picker, kb_start_time_picker, kb_duration_picker,
     kb_until_input, kb_monthly_days_input, kb_booking_back_to_title, kb_room_view,
+    kb_find_start_time_picker, kb_find_duration_picker,
 )
 from db.queries.rooms import get_rooms, get_room
 from db.queries.bookings import (
@@ -37,7 +38,8 @@ class BookingStates(StatesGroup):
     confirming = State()
     # Find free room flow
     find_entering_date = State()
-    find_entering_time = State()
+    find_entering_start_time = State()
+    find_entering_duration = State()
 
 
 def _format_booking_summary(data: dict) -> str:
@@ -840,54 +842,47 @@ async def cb_cancel_booking_flow(cb: CallbackQuery, state: FSMContext, active_co
 
 # ── Find Free Room ─────────────────────────────────────────────────────────
 
-@router.callback_query(F.data == "find_free_room")
-async def cb_find_free_room(cb: CallbackQuery, state: FSMContext, active_company) -> None:
-    if not active_company:
-        await cb.answer("⛔ Выберите активную компанию.", show_alert=True)
-        return
-    await cb.answer()
-    await cb.message.edit_text(
-        "🔍 <b>Поиск свободной комнаты</b>\n\n"
-        "📅 Введите дату в формате ДД.ММ.ГГГГ:",
-        reply_markup=kb_cancel(),
-        parse_mode="HTML",
-    )
-    await state.set_state(BookingStates.find_entering_date)
-
-
-@router.message(BookingStates.find_entering_date, F.text, ~F.text.startswith("/"))
-async def msg_find_date(message: Message, state: FSMContext) -> None:
-    d = _parse_date_input(message.text)
-    if d is None:
-        await message.answer("❗ Неверный формат даты. Введите ДД.ММ.ГГГГ:")
-        return
-    if d < date.today():
-        await message.answer("❗ Нельзя искать в прошлом. Введите сегодняшнюю или будущую дату:")
-        return
+async def _find_show_start_time(target, state: FSMContext, d: date) -> None:
+    """Store find_date, show dynamic half-hour slots for start time (no room filter)."""
     await state.update_data(find_date=d.isoformat())
-    await message.answer(
-        "⏰ Введите желаемое время начала и конца в формате ЧЧ:ММ-ЧЧ:ММ\n"
-        "Например: 10:00-11:30",
-        reply_markup=kb_cancel(),
-    )
-    await state.set_state(BookingStates.find_entering_time)
+    now = datetime.now()
+    date_str = d.isoformat()
+    # Determine starting point
+    if d == date.today():
+        start_h, start_m = now.hour, now.minute
+    else:
+        start_h, start_m = 11, 0
+    slots: list[str] = []
+    for h in range(start_h, 24):
+        for m in (0, 30):
+            if h == start_h and m < start_m:
+                continue
+            # Only include if the 30-min slot fits before midnight
+            end_m = m + 30
+            end_h = h + end_m // 60
+            if end_h >= 24:
+                break
+            slots.append(f"{h:02d}:{m:02d}")
+            if len(slots) >= 4:
+                break
+        if len(slots) >= 4:
+            break
+    date_display = d.strftime("%d.%m.%Y")
+    hint = "\n\nИли введите время вручную в формате ЧЧ:ММ:" if slots else "\nВведите время начала в формате ЧЧ:ММ:"
+    text = f"🔍 Дата: <b>{date_display}</b>\n\nВыберите время начала:{hint}"
+    kb = kb_find_start_time_picker(slots)
+    if hasattr(target, "message"):
+        await target.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await target.answer(text, reply_markup=kb, parse_mode="HTML")
+    await state.set_state(BookingStates.find_entering_start_time)
 
 
-@router.message(BookingStates.find_entering_time, F.text, ~F.text.startswith("/"))
-async def msg_find_time(message: Message, state: FSMContext, active_company) -> None:
-    parsed = _parse_time_range(message.text)
-    if parsed is None:
-        await message.answer(
-            "❗ Неверный формат. Введите ЧЧ:ММ-ЧЧ:ММ (конец должен быть позже начала):"
-        )
-        return
-    start_time, end_time = parsed
+async def _find_show_results(target, state: FSMContext, active_company) -> None:
+    """Run the search and show results."""
     data = await state.get_data()
-    find_date = data["find_date"]
-    start_dt = f"{find_date} {start_time}"
-    end_dt = f"{find_date} {end_time}"
-
-    await state.update_data(find_start_dt=start_dt, find_end_dt=end_dt)
+    start_dt = data["find_start_dt"]
+    end_dt = data["find_end_dt"]
 
     free_rooms = await find_free_rooms(
         company_id=active_company["company_id"],
@@ -900,16 +895,162 @@ async def msg_find_time(message: Message, state: FSMContext, active_company) -> 
     time_str = f"{start.strftime('%d.%m.%Y')} {start.strftime('%H:%M')}–{end.strftime('%H:%M')}"
 
     if not free_rooms:
-        await message.answer(
-            f"😔 На <b>{time_str}</b> все комнаты заняты.\n\nПопробуйте другое время.",
-            reply_markup=kb_back_to_menu(),
-            parse_mode="HTML",
-        )
+        text = f"😔 На <b>{time_str}</b> все комнаты заняты.\n\nПопробуйте другое время."
+        if hasattr(target, "message"):
+            await target.message.edit_text(text, reply_markup=kb_back_to_menu(), parse_mode="HTML")
+        else:
+            await target.answer(text, reply_markup=kb_back_to_menu(), parse_mode="HTML")
         await state.clear()
         return
 
-    await message.answer(
-        f"✅ Свободные комнаты на <b>{time_str}</b>:\n\nВыберите комнату для бронирования:",
-        reply_markup=kb_free_rooms(free_rooms),
+    text = f"✅ Свободные комнаты на <b>{time_str}</b>:\n\nВыберите комнату для бронирования:"
+    if hasattr(target, "message"):
+        await target.message.edit_text(text, reply_markup=kb_free_rooms(free_rooms), parse_mode="HTML")
+    else:
+        await target.answer(text, reply_markup=kb_free_rooms(free_rooms), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "find_free_room")
+async def cb_find_free_room(cb: CallbackQuery, state: FSMContext, active_company) -> None:
+    if not active_company:
+        await cb.answer("⛔ Выберите активную компанию.", show_alert=True)
+        return
+    await cb.answer()
+    await cb.message.edit_text(
+        "🔍 <b>Поиск свободной комнаты</b>\n\n"
+        "📅 Введите дату поиска в формате ДД.ММ.ГГГГ\n"
+        f"Например: {date.today().strftime(DATE_FMT_INPUT)}\n\n"
+        "Или выберите:",
+        reply_markup=kb_date_picker(),
         parse_mode="HTML",
     )
+    await state.set_state(BookingStates.find_entering_date)
+
+
+@router.callback_query(BookingStates.find_entering_date, F.data == "date_today")
+async def cb_find_date_today(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    await _find_show_start_time(cb, state, date.today())
+
+
+@router.callback_query(BookingStates.find_entering_date, F.data == "date_tomorrow")
+async def cb_find_date_tomorrow(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    await _find_show_start_time(cb, state, date.today() + timedelta(days=1))
+
+
+@router.message(BookingStates.find_entering_date, F.text, ~F.text.startswith("/"))
+async def msg_find_date(message: Message, state: FSMContext) -> None:
+    d = _parse_date_input(message.text)
+    if d is None:
+        await message.answer("❗ Неверный формат даты. Введите ДД.ММ.ГГГГ:")
+        return
+    if d < date.today():
+        await message.answer("❗ Нельзя искать в прошлом. Введите сегодняшнюю или будущую дату:")
+        return
+    await _find_show_start_time(message, state, d)
+
+
+# ── Find: back navigation ──────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("find_back:"))
+async def cb_find_back(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    step = cb.data.split(":")[1]
+    data = await state.get_data()
+    if step == "date":
+        # Back to date entry
+        await cb.message.edit_text(
+            "🔍 <b>Поиск свободной комнаты</b>\n\n"
+            "📅 Введите дату поиска в формате ДД.ММ.ГГГГ\n"
+            f"Например: {date.today().strftime(DATE_FMT_INPUT)}\n\n"
+            "Или выберите:",
+            reply_markup=kb_date_picker(),
+            parse_mode="HTML",
+        )
+        await state.set_state(BookingStates.find_entering_date)
+    elif step == "start_time":
+        # Back to start time — regenerate slots
+        find_date = data.get("find_date", date.today().isoformat())
+        d = datetime.strptime(find_date, "%Y-%m-%d").date()
+        await _find_show_start_time(cb, state, d)
+
+
+# ── Find: start time ───────────────────────────────────────────────────────
+
+@router.callback_query(BookingStates.find_entering_start_time, F.data.startswith("find_start_time:"))
+async def cb_find_start_time_slot(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    start_time_str = cb.data.split(":", 1)[1]
+    await state.update_data(find_start_time=start_time_str)
+    find_date = (await state.get_data())["find_date"]
+    date_display = datetime.strptime(find_date, "%Y-%m-%d").strftime("%d.%m.%Y")
+    await cb.message.edit_text(
+        f"⏰ Начало: <b>{date_display} {start_time_str}</b>\n\n"
+        "Выберите продолжительность или введите время окончания (ЧЧ:ММ):",
+        reply_markup=kb_find_duration_picker(),
+        parse_mode="HTML",
+    )
+    await state.set_state(BookingStates.find_entering_duration)
+
+
+@router.message(BookingStates.find_entering_start_time, F.text, ~F.text.startswith("/"))
+async def msg_find_start_time(message: Message, state: FSMContext) -> None:
+    t = _parse_time(message.text)
+    if t is None:
+        await message.answer("❗ Неверный формат. Введите время в формате ЧЧ:ММ:")
+        return
+    start_time_str = t.strftime("%H:%M")
+    await state.update_data(find_start_time=start_time_str)
+    find_date = (await state.get_data())["find_date"]
+    date_display = datetime.strptime(find_date, "%Y-%m-%d").strftime("%d.%m.%Y")
+    await message.answer(
+        f"⏰ Начало: <b>{date_display} {start_time_str}</b>\n\n"
+        "Выберите продолжительность или введите время окончания (ЧЧ:ММ):",
+        reply_markup=kb_find_duration_picker(),
+        parse_mode="HTML",
+    )
+    await state.set_state(BookingStates.find_entering_duration)
+
+
+# ── Find: duration ─────────────────────────────────────────────────────────
+
+async def _apply_find_duration(target, state: FSMContext, end_time_str: str, active_company) -> None:
+    """Validate end > start, save datetimes, show free rooms."""
+    data = await state.get_data()
+    find_date = data["find_date"]
+    start_time_str = data["find_start_time"]
+    start_dt = f"{find_date} {start_time_str}"
+    end_dt = f"{find_date} {end_time_str}"
+    s = datetime.strptime(start_dt, DT_FMT)
+    e = datetime.strptime(end_dt, DT_FMT)
+    if e <= s:
+        err = "❗ Время окончания должно быть позже начала. Попробуйте ещё раз или нажмите ◀️ Назад:"
+        if hasattr(target, "message"):
+            await target.message.answer(err, reply_markup=kb_find_duration_picker())
+        else:
+            await target.answer(err, reply_markup=kb_find_duration_picker())
+        return
+    await state.update_data(find_start_dt=start_dt, find_end_dt=end_dt)
+    await _find_show_results(target, state, active_company)
+
+
+@router.callback_query(BookingStates.find_entering_duration, F.data.startswith("find_duration:"))
+async def cb_find_duration_slot(cb: CallbackQuery, state: FSMContext, active_company) -> None:
+    await cb.answer()
+    minutes = int(cb.data.split(":")[1])
+    data = await state.get_data()
+    find_date = data["find_date"]
+    start_time_str = data["find_start_time"]
+    start = datetime.strptime(f"{find_date} {start_time_str}", DT_FMT)
+    end = start + timedelta(minutes=minutes)
+    await _apply_find_duration(cb, state, end.strftime("%H:%M"), active_company)
+
+
+@router.message(BookingStates.find_entering_duration, F.text, ~F.text.startswith("/"))
+async def msg_find_duration_manual(message: Message, state: FSMContext, active_company) -> None:
+    t = _parse_time(message.text)
+    if t is None:
+        await message.answer("❗ Неверный формат. Введите время окончания в формате ЧЧ:ММ:")
+        return
+    await _apply_find_duration(message, state, t.strftime("%H:%M"), active_company)

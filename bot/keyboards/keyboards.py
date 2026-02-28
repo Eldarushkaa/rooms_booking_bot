@@ -258,6 +258,35 @@ def kb_my_bookings_nav() -> InlineKeyboardMarkup:
 
 # ── Find Free Room ─────────────────────────────────────────────────────────
 
+def kb_find_start_time_picker(slots: list[str]) -> InlineKeyboardMarkup:
+    """Quick start-time buttons for the find-room flow (no room-specific conflict filter)."""
+    rows = []
+    if slots:
+        rows.append([
+            InlineKeyboardButton(text=s, callback_data=f"find_start_time:{s}")
+            for s in slots
+        ])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="find_back:date")])
+    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def kb_find_duration_picker() -> InlineKeyboardMarkup:
+    """Duration buttons for the find-room flow."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="30 мин", callback_data="find_duration:30"),
+            InlineKeyboardButton(text="1 ч", callback_data="find_duration:60"),
+        ],
+        [
+            InlineKeyboardButton(text="1 ч 30 мин", callback_data="find_duration:90"),
+            InlineKeyboardButton(text="2 ч", callback_data="find_duration:120"),
+        ],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="find_back:start_time")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action")],
+    ])
+
+
 def kb_free_rooms(rooms: list) -> InlineKeyboardMarkup:
     rows = []
     for room in rooms:
